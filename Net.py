@@ -15,12 +15,13 @@ class Markov_Switching(pt.nn.Module):
         tprobs[1] = switching_diag_1
         self.switching_vec = pt.log(tprobs).to(device=device)
         self.dyn = dyn
-        if dyn == 'Uni' or dyn == 'Deter':
-            self.probs = pt.ones(n_models)/n_models
-        else:
-            self.probs = tprobs
+        
 
     def init_state(self, batches, n_samples):
+        if self.dyn == 'Uni':
+            self.probs = pt.ones(self.n_models)/self.n_models
+        else:
+            self.probs = pt.exp(self.switching_vec)
         if self.dyn == 'Deter':
             return pt.arange(self.n_models, device=self.device).tile((batches, n_samples//self.n_models)).unsqueeze(2)
         return pt.multinomial(pt.ones(self.n_models), batches*n_samples, True).reshape((batches, n_samples, 1)).to(device=self.device)

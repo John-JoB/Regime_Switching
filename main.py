@@ -45,7 +45,7 @@ def main():
     if args.alg == 'RSPF':
         def train_test():
             nonlocal args
-            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = True, device=args.device, num_workers=0)
+            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = False, device=args.device, num_workers=0)
             if args.experiment == 'Markov':
                 model = PF([-0.1, -0.3, -0.5, -0.9, 0.1, 0.3, 0.5, 0.9], [0, -2, 2, -4, 0, 2, -2, 4], 0.1, Markov_Switching(8, 0.8, 0.15, 'Boot', device=args.device), 'Boot', args.device)
             else:
@@ -57,7 +57,7 @@ def main():
     if args.alg == 'RLPF' or args.alg == 'RSDBPF':
         def train_test():
             nonlocal args
-            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = True, device=args.device, num_workers=0)
+            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = False, device=args.device, num_workers=0)
             if args.alg == 'RLPF':
                 model = RSDBPF(8, NN_Switching(8, 8, 'Uni', args.device), args.init_scale, args.layers, args.hidden_size, 'Uni', args.device)
                 re_model = Redefined_RSDBPF(8, NN_Switching(8, 8, 'Uni', args.device), 'Uni', args.device)
@@ -70,7 +70,6 @@ def main():
             
             DPF = Differentiable_Particle_Filter(model, 200, Soft_Resampler_Systematic(1, 0), 200, args.device)
             if args.opt == 'AdamW':
-                print('AdamW')
                 opt = pt.optim.AdamW(params=DPF.parameters(), lr = args.lr, weight_decay=args.w_decay)
             else:
                 opt = pt.optim.SGD(params= DPF.parameters(), lr = args.lr, momentum=0.9, weight_decay=args.w_decay)
@@ -86,7 +85,7 @@ def main():
     if args.alg == 'DBPF' or args.alg == 'MADPF':
         def train_test():
             nonlocal args
-            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = True, device=args.device, num_workers=0)
+            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = False, device=args.device, num_workers=0)
             if args.alg == 'DBPF':
                 model = DBPF(8, args.init_scale, args.layers, args.hidden_size, args.device)
                 DPF = Differentiable_Particle_Filter(model, 200, Soft_Resampler_Systematic(1, 0), 200, args.device)
@@ -103,13 +102,12 @@ def main():
                 opt_sch = pt.optim.lr_scheduler.MultiStepLR(opt, args.lr_steps, args.lr_gamma)
             else:
                 opt_sch = None
-            print('aaaa')
             return e2e_train(DPF, opt, Supervised_L2_Loss(function=lambda x : x[:, :, 0].unsqueeze(2)), 50, data, [100, -1, -1], [0.5, 0.25, 0.25], args.epochs, 10, opt_sch, True, args.clip)
 
     if args.alg == 'LSTM' or args.alg == 'Transformer':
         def train_test():
             nonlocal args
-            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = True, device=args.device, num_workers=0)
+            data = State_Space_Dataset(f'./data/{args.data_dir}', lazy = False, device=args.device, num_workers=0)
             if args.alg == 'LSTM':
                 NN = LSTM(1, 20, 1, 1, args.device)
             else:
@@ -123,7 +121,6 @@ def main():
                 opt_sch = pt.optim.lr_scheduler.MultiStepLR(opt, args.lr_steps, args.lr_gamma)
             else:
                 opt_sch = None
-            print('aaaa')
             return train_s2s(NN, opt, data, [100, -1, -1], [0.5, 0.25, 0.25], args.epochs, opt_sch, True, args.clip)
         
     fix_rng(0) 

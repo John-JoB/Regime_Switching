@@ -66,6 +66,11 @@ def e2e_likelihood_train(
     DPF.model.switching_dyn = DPF_valid.model.switching_dyn
     for epoch in range(epochs):
         DPF.train()
+        try:
+            DPF_valid.model.switching_dyn.dyn = 'Uni'
+            DPF_valid.model.alg = DPF.model.PF_Type.Guided
+        except:
+            pass
         train_it = enumerate(train)
         for b, simulated_object in train_it:
             temp_object = model.Observation_Queue(simulated_object.state, pt.concat((simulated_object.observations, simulated_object.state[:, :, :1]), dim = 2))
@@ -88,6 +93,11 @@ def e2e_likelihood_train(
         if opt_schedule is not None:
             opt_schedule.step()
         DPF_valid.eval()
+        try:
+            DPF_valid.model.switching_dyn.dyn = 'Boot'
+            DPF_valid.model.alg = DPF.model.PF_Type.Bootstrap
+        except:
+            pass
         with pt.inference_mode():
             for simulated_object in valid:
                 valid_loss_f.clear_data()
@@ -98,18 +108,13 @@ def e2e_likelihood_train(
 
         if test_loss[epoch].item() < min_valid_loss:
             min_valid_loss = test_loss[epoch].item()
-            best_dict = deepcopy(DPF.state_dict())
+            best_dict = deepcopy(DPF_valid.state_dict())
 
         if verbose:
             print(f'Epoch {epoch}:')
             print(f'Train loss: {np.mean(train_loss[epoch*len(train):(epoch+1)*len(train)])}')
             print(f'Validation loss: {test_loss[epoch]}\n')
 
-
-    if verbose and False:
-        plt.plot(train_loss)
-        plt.plot((np.arange(len(test_loss)) + 1)*(len(train_loss)/len(test_loss)),test_loss)
-        plt.show()
     DPF_valid.load_state_dict(best_dict)
     DPF_valid.n_particles *= test_scaling
     DPF_valid.ESS_threshold *= test_scaling
@@ -165,6 +170,11 @@ def e2e_train(
     
     for epoch in range(epochs):
         DPF.train()
+        try:
+            DPF.model.switching_dyn.dyn = 'Uni'
+            DPF.model.alg = DPF.model.PF_Type.Guided
+        except:
+            pass
         train_it = enumerate(train)
         for b, simulated_object in train_it:
             opt.zero_grad()
@@ -180,6 +190,12 @@ def e2e_train(
         if opt_schedule is not None:
             opt_schedule.step()
         DPF.eval()
+        try:
+            DPF.model.switching_dyn.dyn = 'Boot'
+            DPF.model.alg = DPF.model.PF_Type.Bootstrap
+        except:
+            pass
+        
         with pt.inference_mode():
             for simulated_object in valid:
                 loss.clear_data()
@@ -197,11 +213,6 @@ def e2e_train(
             print(f'Train loss: {np.mean(train_loss[epoch*len(train):(epoch+1)*len(train)])}')
             print(f'Validation loss: {test_loss[epoch]}\n')
 
-
-    if verbose and False:
-        plt.plot(train_loss)
-        plt.plot((np.arange(len(test_loss)) + 1)*(len(train_loss)/len(test_loss)),test_loss)
-        plt.show()
     DPF.load_state_dict(best_dict)
     DPF.n_particles *= test_scaling
     DPF.ESS_threshold *= test_scaling
@@ -234,10 +245,7 @@ def train_s2s(NN: pt.nn.Module, opt: pt.optim.Optimizer, data: pt.utils.data.Dat
     
     for epoch in range(epochs):
         NN.train()
-        if verbose:
-            train_it = enumerate(tqdm(train))
-        else:
-            train_it = enumerate(train)
+        train_it = enumerate(train)
         for b, simulated_object in train_it:
             opt.zero_grad()
             x = NN(simulated_object.observations)
@@ -263,12 +271,6 @@ def train_s2s(NN: pt.nn.Module, opt: pt.optim.Optimizer, data: pt.utils.data.Dat
             print(f'Epoch {epoch}:')
             print(f'Train loss: {np.mean(train_loss[epoch*len(train):(epoch+1)*len(train)])}')
             print(f'Validation loss: {test_loss[epoch]}\n')
-
-
-    if verbose and False:
-        plt.plot(train_loss)
-        plt.plot((np.arange(len(test_loss)) + 1)*(len(train_loss)/len(test_loss)),test_loss)
-        plt.show()
 
     NN.load_state_dict(best_dict)
     for simulated_object in test:
