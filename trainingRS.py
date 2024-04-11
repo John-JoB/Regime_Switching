@@ -19,7 +19,7 @@ def _test(
         ):
     DPF.eval()
     with pt.inference_mode():
-        for i, simulated_object in enumerate(tqdm(data)):
+        for i, simulated_object in enumerate(data):
             loss.clear_data()
             loss.register_data(truth=simulated_object)
             DPF(simulated_object, T, loss.get_reporters())
