@@ -1,7 +1,7 @@
 import argparse
 from Net import PF, RSDBPF, Redefined_RSDBPF, Markov_Switching, Polya_Switching, NN_Switching, DBPF, LSTM, MAPF, Transformer
 from dpf.model import Simulated_Object, State_Space_Dataset
-from trainingRS import test, e2e_train, e2e_likelihood_train, train_s2s
+from trainingRS import test, e2e_train, e2e_likelihood_train, train_s2s, time_execution_lambda, time_execution_MSE, time_execution_s2s
 from dpf.simulation import Differentiable_Particle_Filter
 from simulationRS import MADPF
 from dpf.resampling import Soft_Resampler_Systematic
@@ -9,6 +9,7 @@ from dpf.loss import Supervised_L2_Loss
 import torch as pt
 from dpf.utils import aggregate_runs, fix_rng
 import pickle
+import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(description='Testing')
@@ -31,6 +32,7 @@ def main():
     parser.add_argument('--hid_size', dest='hidden_size', type=int, default=8, help='Number of nodes in hidden layers')
     parser.add_argument('--data_dir', dest='data_dir', type=str, default='temp', help='Data directory')
     parser.add_argument('--epochs', dest='epochs', type=int, default=50, help='Number of epochs to train for')
+    parser.add_argument('--time', dest='timing', action='store_true', help='Whether to time execution')
     
     args = parser.parse_args()
     def create_data():
@@ -79,8 +81,10 @@ def main():
                 opt_sch = None
             if args.train_alg == 'Lambda':
                 DPF_ELBO = Differentiable_Particle_Filter(re_model, 200, Soft_Resampler_Systematic(args.softness, 1), 200, args.device)
+                if args.timing:
+                    return time_execution_lambda(DPF_ELBO, DPF, opt, 50, data, [100, -1, -1], [0.5, 0.25, 0.25], 600, 10, opt_sch, True, args.clip, args.lamb)
                 return e2e_likelihood_train(DPF_ELBO, DPF, opt, 50, data, [100, -1, -1], [0.5, 0.25, 0.25], args.epochs, 10, opt_sch, True, args.clip, args.lamb)
-            return e2e_train(DPF, opt, Supervised_L2_Loss(function=lambda x : x[:, :, 0].unsqueeze(2)), 50, data, [100, -1, -1], [0.5, 0.25, 0.25], args.epochs, 10, opt_sch, True, args.clip)
+            return time_execution_MSE(DPF, opt, Supervised_L2_Loss(function=lambda x : x[:, :, 0].unsqueeze(2)), 50, data, [100, -1, -1], [0.5, 0.25, 0.25], 600, 10, opt_sch, True, args.clip)
         
     if args.alg == 'DBPF' or args.alg == 'MADPF':
         def train_test():
@@ -102,6 +106,8 @@ def main():
                 opt_sch = pt.optim.lr_scheduler.MultiStepLR(opt, args.lr_steps, args.lr_gamma)
             else:
                 opt_sch = None
+            if args.timing:
+                return time_execution_MSE(DPF, opt, Supervised_L2_Loss(function=lambda x : x[:, :, 0].unsqueeze(2)), 50, data, [100, -1, -1], [0.5, 0.25, 0.25], 600, 10, opt_sch, True, args.clip)
             return e2e_train(DPF, opt, Supervised_L2_Loss(function=lambda x : x[:, :, 0].unsqueeze(2)), 50, data, [100, -1, -1], [0.5, 0.25, 0.25], args.epochs, 10, opt_sch, True, args.clip)
 
     if args.alg == 'LSTM' or args.alg == 'Transformer':
@@ -111,7 +117,7 @@ def main():
             if args.alg == 'LSTM':
                 NN = LSTM(1, 20, 1, 1, args.device)
             else:
-                NN = Transformer(1, 10, 1, 50, 'cuda')
+                NN = Transformer(1, 29, 1, 26, 'cuda', 5)
             if args.opt == 'AdamW':
                 print('AdamW')
                 opt = pt.optim.AdamW(params=NN.parameters(), lr = args.lr, weight_decay=args.w_decay)
@@ -121,15 +127,22 @@ def main():
                 opt_sch = pt.optim.lr_scheduler.MultiStepLR(opt, args.lr_steps, args.lr_gamma)
             else:
                 opt_sch = None
+            if args.timing:
+                return time_execution_s2s(NN, opt, data, [100, -1, -1], [0.5, 0.25, 0.25], 600, opt_sch, True, args.clip)
             return train_s2s(NN, opt, data, [100, -1, -1], [0.5, 0.25, 0.25], args.epochs, opt_sch, True, args.clip)
         
-    fix_rng(0) 
+    fix_rng(1) 
     def run():
         nonlocal create_data
         nonlocal train_test
         create_data()
         return train_test()
-    
+    if args.timing:
+        times, loss = run()
+        np.save(f'./results/{args.store_loc}_time.npy', times)
+        np.save(f'./results/{args.store_loc}_loss.npy', loss)
+        return
+        
     dic = aggregate_runs(run, args.n_runs, ['loss', 'per_step_loss'])
     print(dic)
     with open(f'./results/{args.store_loc}.pickle', 'wb') as handle:

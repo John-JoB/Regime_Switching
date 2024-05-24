@@ -9,6 +9,7 @@ from dpf.loss import Loss
 from dpf import model
 from dpf import loss as losses
 from dpf import results
+import time
 
 
 def _test(
@@ -41,8 +42,9 @@ def e2e_likelihood_train(
         opt_schedule: pt.optim.lr_scheduler.LRScheduler=None,
         verbose:bool=True,
         clip:float = pt.inf,
-        lamb: float = 1.
+        lamb: float = 1.,
         ):
+    
     train_set, valid_set, test_set = pt.utils.data.random_split(data, set_fractions)
     if batch_size[0] == -1:
         batch_size[0] = len(train_set)
@@ -64,6 +66,7 @@ def e2e_likelihood_train(
     DPF.model.sd_o = DPF_valid.model.sd_o
     DPF.model.sd_d = DPF_valid.model.sd_d
     DPF.model.switching_dyn = DPF_valid.model.switching_dyn
+    
     for epoch in range(epochs):
         DPF.train()
         try:
@@ -119,6 +122,100 @@ def e2e_likelihood_train(
     DPF_valid.n_particles *= test_scaling
     DPF_valid.ESS_threshold *= test_scaling
     return _test(DPF_valid, valid_loss_f, T, test)
+
+
+def time_execution_lambda(
+        DPF: Differentiable_Particle_Filter,
+        DPF_valid: Differentiable_Particle_Filter,
+        opt: pt.optim.Optimizer,
+        T: int, 
+        data: pt.utils.data.Dataset, 
+        batch_size: Iterable[int], 
+        set_fractions: Iterable[float], 
+        max_time: int,
+        test_scaling: float=1,
+        opt_schedule: pt.optim.lr_scheduler.LRScheduler=None,
+        verbose:bool=True,
+        clip:float = pt.inf,
+        lamb: float = 1.,
+        ):
+    train_set, valid_set, test_set = pt.utils.data.random_split(data, set_fractions)
+    if batch_size[0] == -1:
+        batch_size[0] = len(train_set)
+    if batch_size[1] == -1:
+        batch_size[1] = len(valid_set)
+    if batch_size[2] == -1:
+        batch_size[2] = len(test_set)
+
+    train = pt.utils.data.DataLoader(train_set, batch_size[0], shuffle=True, collate_fn=data.collate, num_workers= data.workers)
+    valid = pt.utils.data.DataLoader(valid_set, min(batch_size[1], len(valid_set)), shuffle=False, collate_fn=data.collate, num_workers= data.workers)
+    test = pt.utils.data.DataLoader(test_set, min(batch_size[2], len(test_set)), shuffle=False, collate_fn=data.collate, num_workers= data.workers, drop_last=True)
+    loss =  losses.Magnitude_Loss(results.Log_Likelihood_Factors(), sign=-1)
+    valid_loss_f = losses.Supervised_L2_Loss(function=lambda x: x[:, :, 0].unsqueeze(2))
+    min_valid_loss = pt.inf
+    DPF.model.dyn_models = DPF_valid.model.dyn_models 
+    DPF.model.obs_models = DPF_valid.model.obs_models
+    DPF.model.sd_o = DPF_valid.model.sd_o
+    DPF.model.sd_d = DPF_valid.model.sd_d
+    DPF.model.switching_dyn = DPF_valid.model.switching_dyn
+    valid_loss = []
+    times = []
+    start = time.time()
+    while time.time() - start < max_time:
+        DPF.train()
+        try:
+            DPF_valid.model.switching_dyn.dyn = 'Uni'
+            DPF_valid.model.alg = DPF.model.PF_Type.Guided
+        except:
+            pass
+        train_it = enumerate(train)
+        for b, simulated_object in train_it:
+            temp_object = model.Observation_Queue(simulated_object.state, pt.concat((simulated_object.observations, simulated_object.state[:, :, :1]), dim = 2))
+            opt.zero_grad()
+            loss.clear_data()
+            loss.register_data(truth=temp_object)
+            valid_loss_f.clear_data()
+            valid_loss_f.register_data(truth=simulated_object)
+            DPF(temp_object, T, loss.get_reporters())
+            DPF_valid(simulated_object, T, valid_loss_f.get_reporters())
+            loss_1 = loss()
+            loss_2 = valid_loss_f()
+            (loss_1 + lamb*loss_2).backward()
+            for p in DPF.parameters():
+                p.grad = pt.clamp(p.grad, -clip, clip)
+            opt.step()
+            DPF.model.sd_d.data.clamp_(-1, 1)
+            DPF.model.sd_o.data.clamp_(-1, 1)
+        if opt_schedule is not None:
+            opt_schedule.step()
+        DPF_valid.eval()
+        try:
+            DPF_valid.model.switching_dyn.dyn = 'Boot'
+            DPF_valid.model.alg = DPF.model.PF_Type.Bootstrap
+        except:
+            pass
+        with pt.inference_mode():
+            DPF_valid.n_particles *= test_scaling
+            DPF_valid.ESS_threshold *= test_scaling
+            valid_loss.append(0)
+            for simulated_object in valid:
+                valid_loss_f.clear_data()
+                valid_loss_f.register_data(truth=simulated_object)
+                DPF_valid(simulated_object, T, valid_loss_f.get_reporters())
+                valid_loss[-1] += valid_loss_f().item()
+            valid_loss[-1] /= len(valid)
+            times.append(time.time() - start)
+
+        if verbose:
+            print(f'Validation loss: {valid_loss[-1]}\n')
+
+        DPF_valid.n_particles //= test_scaling
+        DPF_valid.ESS_threshold //= test_scaling
+
+   
+    plt.plot(times, valid_loss)
+    plt.show()
+    return np.array(times), np.array(valid_loss)
 
 def test(DPF: Differentiable_Particle_Filter,
         loss: Loss, 
@@ -217,6 +314,143 @@ def e2e_train(
     DPF.n_particles *= test_scaling
     DPF.ESS_threshold *= test_scaling
     return _test(DPF, loss, T, test)
+
+def time_execution_MSE(
+        DPF: Differentiable_Particle_Filter,
+        opt: pt.optim.Optimizer,
+        loss: Loss, 
+        T: int, 
+        data: pt.utils.data.Dataset, 
+        batch_size: Iterable[int], 
+        set_fractions: Iterable[float], 
+        max_time: int,
+        test_scaling: float=1,
+        opt_schedule: pt.optim.lr_scheduler.LRScheduler=None,
+        verbose:bool=True,
+        clip:float = pt.inf
+        ):
+    try:
+        train_set, valid_set, test_set = pt.utils.data.random_split(data, set_fractions)
+        if batch_size[0] == -1:
+            batch_size[0] = len(train_set)
+        if batch_size[1] == -1:
+            batch_size[1] = len(valid_set)
+        if batch_size[2] == -1:
+            batch_size[2] = len(test_set)
+
+        train = pt.utils.data.DataLoader(train_set, batch_size[0], shuffle=True, collate_fn=data.collate, num_workers= data.workers)
+        valid = pt.utils.data.DataLoader(valid_set, min(batch_size[1], len(valid_set)), shuffle=False, collate_fn=data.collate, num_workers= data.workers)
+        test = pt.utils.data.DataLoader(test_set, min(batch_size[2], len(test_set)), shuffle=False, collate_fn=data.collate, num_workers= data.workers, drop_last=True)
+    except:
+        train, valid, test = set_fractions
+    valid_loss = []
+    times = []
+    start = time.time()
+    while time.time() - start < max_time:
+        DPF.train()
+        try:
+            DPF.model.switching_dyn.dyn = 'Uni'
+            DPF.model.alg = DPF.model.PF_Type.Guided
+        except:
+            pass
+        train_it = enumerate(train)
+        for b, simulated_object in train_it:
+            opt.zero_grad()
+            loss.clear_data()
+            loss.register_data(truth=simulated_object)
+            DPF(simulated_object, T, loss.get_reporters())
+
+            loss()
+            loss.backward()
+            pt.nn.utils.clip_grad_value_(DPF.parameters(), clip)
+            opt.step()
+        if opt_schedule is not None:
+            opt_schedule.step()
+        DPF.eval()
+        try:
+            DPF.model.switching_dyn.dyn = 'Boot'
+            DPF.model.alg = DPF.model.PF_Type.Bootstrap
+        except:
+            pass
+        
+        with pt.inference_mode():
+            DPF.n_particles *= test_scaling
+            DPF.ESS_threshold *= test_scaling
+            valid_loss.append(0)
+            for simulated_object in valid:
+                loss.clear_data()
+                loss.register_data(truth=simulated_object)
+                DPF(simulated_object, T, loss.get_reporters())
+                valid_loss[-1] += loss().item()
+            valid_loss[-1] /= len(valid)
+            times.append(time.time() - start)
+
+        DPF.n_particles //= test_scaling
+        DPF.ESS_threshold //= test_scaling
+
+
+
+        if verbose:
+            print(f'Validation loss: {valid_loss[-1]}\n')
+
+    plt.plot(times, valid_loss)
+    plt.show()
+    return np.array(times), np.array(valid_loss)
+
+
+def time_execution_s2s(NN: pt.nn.Module, opt: pt.optim.Optimizer, data: pt.utils.data.Dataset, batch_size: Iterable[int], 
+        set_fractions: Iterable[float], 
+        max_time: int,
+        opt_schedule: pt.optim.lr_scheduler.LRScheduler=None,
+        verbose:bool=True,
+        clip:float = pt.inf
+        ):
+    try:
+        train_set, valid_set, test_set = pt.utils.data.random_split(data, set_fractions)
+        if batch_size[0] == -1:
+            batch_size[0] = len(train_set)
+        if batch_size[1] == -1:
+            batch_size[1] = len(valid_set)
+        if batch_size[2] == -1:
+            batch_size[2] = len(test_set)
+
+        train = pt.utils.data.DataLoader(train_set, batch_size[0], shuffle=True, collate_fn=data.collate, num_workers= data.workers)
+        valid = pt.utils.data.DataLoader(valid_set, min(batch_size[1], len(valid_set)), shuffle=False, collate_fn=data.collate, num_workers= data.workers)
+        test = pt.utils.data.DataLoader(test_set, min(batch_size[2], len(test_set)), shuffle=False, collate_fn=data.collate, num_workers= data.workers, drop_last=True)
+    except:
+        train, valid, test = set_fractions
+
+    
+    valid_loss = []
+    times = []
+    start = time.time()
+    while time.time() - start < max_time:
+        NN.train()
+        train_it = enumerate(train)
+        for b, simulated_object in train_it:
+            opt.zero_grad()
+            x = NN(simulated_object.observations)
+            loss = pt.mean((x - simulated_object.state[:, :, 0:1])**2)
+            loss.backward()
+            pt.nn.utils.clip_grad_value_(NN.parameters(), clip)
+            opt.step()
+        if opt_schedule is not None:
+            opt_schedule.step()
+        NN.eval()
+        valid_loss.append(0)
+        for simulated_object in valid:
+            x = NN(simulated_object.observations)
+            loss = pt.mean((x - simulated_object.state[:, :, 0:1])**2)
+            valid_loss[-1] += loss.item()
+        valid_loss[-1] /= len(valid)
+        times.append(time.time() - start)
+
+        if verbose:
+            print(f'Validation loss: {valid_loss[-1]}\n')
+
+    plt.plot(times, valid_loss)
+    plt.show()
+    return np.array(times), np.array(valid_loss)
 
 def train_s2s(NN: pt.nn.Module, opt: pt.optim.Optimizer, data: pt.utils.data.Dataset, batch_size: Iterable[int], 
         set_fractions: Iterable[float], 

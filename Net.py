@@ -30,11 +30,11 @@ class Markov_Switching(pt.nn.Module):
         if self.dyn == 'Deter':
             return pt.arange(self.n_models, device=self.device).tile((x_t_1.size(0), x_t_1.size(1)//self.n_models)).unsqueeze(2) 
         shifts = pt.multinomial(self.probs, x_t_1.size(0)*x_t_1.size(1), True).to(self.device).reshape([x_t_1.size(0),x_t_1.size(1)])
-        new_models = pt.remainder(shifts + x_t_1[:, :, 1], self.n_models)
+        new_models = pt.remainder(shifts + x_t_1[:, :, 0], self.n_models)
         return new_models.unsqueeze(2)
     
     def get_log_probs(self, x_t, x_t_1):
-        shifts = (x_t[:,:,1] - x_t_1[:,:,1])
+        shifts = (x_t[:,:,0] - x_t_1[:,:,0])
         shifts = pt.remainder(shifts, self.n_models).to(int)
         return self.switching_vec[shifts]
 
@@ -54,14 +54,14 @@ class Polya_Switching(pt.nn.Module):
 
     def forward(self, x_t_1, t):
         self.scatter_v.zero_()
-        self.scatter_v.scatter_(2, x_t_1[:,:,1].unsqueeze(2).to(int), 1)
-        c = x_t_1[:,:,2:] + self.scatter_v
+        self.scatter_v.scatter_(2, x_t_1[:,:,0].unsqueeze(2).to(int), 1)
+        c = x_t_1[:,:,1:] + self.scatter_v
         if self.dyn == 'Uni':
             return pt.concat((pt.multinomial(self.ones_vec,  x_t_1.size(0)*x_t_1.size(1), True).to(self.device).reshape([x_t_1.size(0),x_t_1.size(1), 1]), c), dim=2)
         return pt.concat((pt.multinomial(c.reshape(-1, self.n_models), 1, True).to(self.device).reshape([x_t_1.size(0), x_t_1.size(1), 1]), c), dim=2)
     
     def get_log_probs(self, x_t, x_t_1):
-        probs = x_t[:, :, 2:]
+        probs = x_t[:, :, 1:]
         probs /= pt.sum(probs, dim=2, keepdim=True)
         s_probs = batched_select(probs, x_t_1[:, :, 1].to(int))
         return pt.log(s_probs)
@@ -89,10 +89,10 @@ class NN_Switching(pt.nn.Module):
             return i_models
 
     def forward(self, x_t_1, t):
-        old_model = x_t_1[:, :, 1].to(int).unsqueeze(2)
+        old_model = x_t_1[:, :, 0].to(int).unsqueeze(2)
         one_hot = pt.zeros((old_model.size(0), old_model.size(1), self.n_models), device=self.device)
         one_hot = pt.scatter(one_hot, 2, old_model, 1)
-        old_recurrent = x_t_1[:, :, 2:]
+        old_recurrent = x_t_1[:, :, 1:]
         c = old_recurrent * self.self_forget(old_recurrent)
         c *= self.forget(one_hot)
         c += self.scale(one_hot) * self.to_reccurrent(one_hot)
@@ -103,8 +103,8 @@ class NN_Switching(pt.nn.Module):
         return pt.concat((pt.multinomial(self.probs, x_t_1.size(0)*x_t_1.size(1), True).to(self.device).reshape([x_t_1.size(0), x_t_1.size(1), 1]), c), dim=2)
     
     def get_log_probs(self, x_t, x_t_1):
-        models = x_t[:,:,1].to(int)
-        probs = pt.abs(self.output_layer(x_t[:, :, 2:])) + 1e-7
+        models = x_t[:,:,0].to(int)
+        probs = pt.abs(self.output_layer(x_t[:, :, 1:])) + 1e-7
         probs = probs / pt.sum(probs, dim=2, keepdim=True)
         log_probs = batched_select(probs.reshape(-1, self.n_models), models.flatten()).reshape(x_t.size(0), x_t.size(1))
         return pt.log(log_probs+1e-7)
@@ -158,7 +158,7 @@ class PF(SSM):
     
     def M_t_proposal(self, x_t_1, t: int):
         noise = self.x_dist.sample([x_t_1.size(0), x_t_1.size(1)]).to(device=self.device)
-        new_models = self.switching_dyn(x_t_1, t)
+        new_models = self.switching_dyn(x_t_1[:, :, 1:], t)
         index = new_models[:,:,0].to(int)
         scaling = self.a[index]
         bias = self.b[index]
@@ -172,7 +172,7 @@ class PF(SSM):
         return pt.zeros([x_0.size(0), x_0.size(1)], device=self.device)
 
     def log_R_t(self, x_t, x_t_1, t: int):
-        return self.switching_dyn.get_log_probs(x_t, x_t_1)
+        return self.switching_dyn.get_log_probs(x_t[:,:,1:], x_t_1[:,:,1:])
 
     def log_f_t(self, x_t, t: int):
         index = x_t[:, :, 1].to(int)
@@ -216,19 +216,22 @@ class RSDBPF(SSM):
             self.alg = self.PF_Type.Guided
 
     def M_0_proposal(self, batches:int, n_samples: int):
+        self.zeros = pt.zeros((batches, n_samples, self.n_models), device=self.device, dtype=bool)
         self.var_factor = -1/(2*(self.sd_o**2) + 1e-6)
         self.pre_factor = -(1/2)*pt.log(self.sd_o**2 + 1e-6) - self.pi_fact
         init_locs = self.init_x_dist.sample([batches, n_samples]).to(device=self.device).unsqueeze(2)
         init_regimes = self.switching_dyn.init_state(batches, n_samples)
+        self.scatter = pt.scatter(self.zeros, 2, init_regimes.to(int), True)
         return pt.cat((init_locs, init_regimes), dim = 2)                   
     
     def M_t_proposal(self, x_t_1, t: int):
         noise = self.x_dist.sample([x_t_1.size(0), x_t_1.size(1)]).to(device=self.device) * self.sd_d
-        new_models = self.switching_dyn(x_t_1, t)
+        new_models = self.switching_dyn(x_t_1[:, :, 1:], t)
         locs = pt.empty((x_t_1.size(0), x_t_1.size(1)), device=self.device)
-        index = new_models[:, :, 0].to(int)
+        index = new_models[:, :, 0:1].to(int)
+        self.scatter = pt.scatter(self.zeros, 2, index, True)
         for m in range(self.n_models):
-            mask = (index == m)
+            mask = self.scatter[:, :, m]
             locs[mask] = self.dyn_models[m](x_t_1[:,:,0][mask])
         new_pos = (locs.unsqueeze(2) + noise)
         return pt.cat((new_pos, new_models), dim = 2)
@@ -240,13 +243,12 @@ class RSDBPF(SSM):
         return pt.zeros([x_0.size(0), x_0.size(1)], device=self.device)
 
     def log_R_t(self, x_t, x_t_1, t: int):
-        return self.switching_dyn.get_log_probs(x_t, x_t_1)
+        return self.switching_dyn.get_log_probs(x_t[:,:,1:], x_t_1[:,:,1:])
 
     def log_f_t(self, x_t, t: int):
-        index = x_t[:, :, 1].to(int)
         locs = pt.empty((x_t.size(0), x_t.size(1)), device=self.device)
         for m in range(self.n_models):
-            mask = (index == m)
+            mask = self.scatter[:, :, m]
             locs[mask] = self.obs_models[m](x_t[:,:,0][mask])
         return self.var_factor * ((self.y[t] - locs)**2) + self.pre_factor
     
@@ -364,14 +366,14 @@ class Redefined_RSDBPF(SSM):
         self.dyn_var_factor = -1/(2*(self.sd_d**2) + 1e-7)
         self.obs_pre_factor = -(1/2)*pt.log(self.sd_o**2 + 1e-7) - self.pi_fact
         self.dyn_pre_factor = -(1/2)*pt.log(self.sd_d**2 + 1e-7) - self.pi_fact
-        init_locs = pt.zeros((batches, n_samples, 1), device = self.device)
         init_regimes = self.switching_dyn.init_state(batches, n_samples)
-        return pt.cat((init_locs, init_regimes), dim = 2)                   
+        self.zeros = pt.zeros((batches, n_samples, self.n_models), device=self.device, dtype=bool)
+        self.scatter = pt.scatter(self.zeros, 2, init_regimes.to(int), True)
+        return init_regimes                
     
     def M_t_proposal(self, x_t_1, t: int):
-        new_pos = pt.zeros((x_t_1.size(0), x_t_1.size(1), 1), device=self.device)
         new_models = self.switching_dyn(x_t_1, t)
-        return pt.cat((new_pos, new_models), dim = 2)
+        return new_models
     
     def log_eta_t(self, x_t, t: int):
         pass
@@ -383,11 +385,12 @@ class Redefined_RSDBPF(SSM):
         return self.switching_dyn.get_log_probs(x_t, x_t_1)
 
     def log_f_t(self, x_t, t: int):
-        index = x_t[:, :, 1].to(int)
+        index = x_t[:, :, 0:1].to(int)
+        self.scatter = pt.scatter(self.zeros, 2, index, True)
         o_probs = pt.empty((x_t.size(0), x_t.size(1)), device=self.device)
         d_probs = pt.zeros_like(o_probs)
         for m in range(self.n_models):
-            mask = (index == m)
+            mask = self.scatter[:, :, m]
             o_loc = self.obs_models[m](self.y[t][:, 1])
             o_probs = pt.where(mask, (self.obs_var_factor*((self.y[t][:, 0] - o_loc) ** 2) + self.obs_pre_factor).unsqueeze(1), o_probs)
             if t != 0:
@@ -407,10 +410,10 @@ class LSTM(pt.nn.Module):
 
 class Transformer(pt.nn.Module):
 
-    def __init__(self, obs_dim, hid_dim, state_dim, T:int = 50, device ='cuda'):
+    def __init__(self, obs_dim, hid_dim, state_dim, T:int = 50, device ='cuda', layers = 2):
         super().__init__()
         self.encoder_layer = pt.nn.TransformerEncoderLayer(hid_dim, 1, hid_dim, 0.1, batch_first=True, device=device)
-        self.transformer = pt.nn.TransformerEncoder(self.encoder_layer, 2)
+        self.transformer = pt.nn.TransformerEncoder(self.encoder_layer, layers)
         self.encoding = pt.nn.Linear(obs_dim, hid_dim, device=device)
         self.decoding = pt.nn.Linear(hid_dim, state_dim, device=device)
         self.relu = pt.nn.ReLU()

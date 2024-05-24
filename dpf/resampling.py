@@ -350,10 +350,12 @@ class Soft_Resampler_Systematic(Resampler):
     def forward(self, x_t:pt.Tensor, log_w_t:pt.Tensor):
         B, N, _ = x_t.size()
         
+        log_n = pt.log(pt.tensor((N), device=self.device))
+
         if self.tradeoff == 1:
             log_particle_probs = log_w_t
         else:
-            log_particle_probs = pt.logaddexp(self.log_tradeoff+log_w_t,  self.log_inv_tradeoff - pt.log(pt.tensor((N), device=self.device)))
+            log_particle_probs = pt.logaddexp(self.log_tradeoff+log_w_t,  self.log_inv_tradeoff - log_n)
         
         offset = pt.rand((B), device=self.device)
         cum_probs = pt.cumsum(pt.exp(log_particle_probs.detach()), dim=1)
@@ -363,11 +365,13 @@ class Soft_Resampler_Systematic(Resampler):
         resampled_indicies = pt.searchsorted(cum_probs*N, resampling_points)
         resampled_particles = batched_reindex(x_t, resampled_indicies)
         if self.tradeoff == 1.:
-            new_weights = pt.zeros_like(log_w_t, device= self.device)
-            resampled_particles = resampled_particles.detach()
+            new_weights = batched_reindex(log_w_t.unsqueeze(2), resampled_indicies).squeeze()
+            resampled_particles = resampled_particles
+            new_weights = new_weights - new_weights.detach() #- log_n
+            new_weights, resampled_particles = soft_grad_wrapper.apply(new_weights, resampled_particles, log_w_t, x_t, self.grad_scale)
         else:
             resampled_particle_probs = batched_reindex(log_particle_probs.unsqueeze(2), resampled_indicies).squeeze()
-            resampled_weights = batched_reindex(log_w_t.unsqueeze(2), resampled_indicies).squeeze()
+            resampled_weights = batched_reindex(log_w_t.unsqueeze(2), resampled_indicies).squeeze() - log_n
             new_weights = resampled_weights - resampled_particle_probs
             new_weights, resampled_particles = soft_grad_wrapper.apply(new_weights, resampled_particles, log_w_t, x_t, self.grad_scale)
         return resampled_particles, new_weights, resampled_indicies
